@@ -123,6 +123,7 @@ namespace LaneReader
         private FieldInfo _floorMidSpin;
         private FieldInfo _floorIsFake;
         private FieldInfo _floorHoldLength;
+        private FieldInfo _floorTapsNeeded;
         private PropertyInfo _conductorInstance;
         private PropertyInfo _conductorSongPosProp;
         private FieldInfo _conductorSongPosField;
@@ -320,6 +321,10 @@ namespace LaneReader
                 // Holds: scrFloor.holdLength is the length of the hold in beats. It is zero on every
                 // ordinary tile, so a chart without holds is completely unaffected.
                 _floorHoldLength = floor.GetField("holdLength", Any);
+                // Multipress tiles ("多次按键方块"): the tile needs more than one press. The game
+                // stores the required count in scrFloor.tapsNeeded (1 on ordinary tiles). Reading
+                // it lets one note per tap be drawn instead of collapsing the tile into one.
+                _floorTapsNeeded = floor.GetField("tapsNeeded", Any);
 
                 _conductorInstance = cond.GetProperty("instance", Any);
                 _conductorSongPosProp = cond.GetProperty("songposition_minusi", Any);
@@ -883,32 +888,51 @@ namespace LaneReader
                 object f = floors[i];
                 if (f == null) continue;
 
-                var note = new Note();
-                note.HitTime = entryTimes[i];
-                note.SeqId = seqIds[i];
-                note.Floor = f;
-                note.MidSpin = IsMidSpin(f);
-                note.GridAngle = double.NaN;
-
-                // Direction from the entry angle: 0 = clockwise quarter turn in ADOFAI's
-                // encoding, which is what scrLevelMaker stores.
-                double entryAngle = _floorEntryAngle != null ? ToDouble(_floorEntryAngle.GetValue(f)) : 0.0;
-                note.Direction = entryAngle == 0.0 ? 1 : 0;
+                // Multipress tiles ("多次按键方块"): a tile can need more than one press. The
+                // game keeps that count in scrFloor.tapsNeeded (1 on ordinary tiles), so one
+                // note is emitted per press - otherwise the whole tile collapses into a single
+                // note and the overlay cannot show it as a multipress.
+                int taps = 1;
+                if (_floorTapsNeeded != null)
+                {
+                    int needed = (int)ToDouble(_floorTapsNeeded.GetValue(f));
+                    if (needed > 1 && needed <= 64)
+                        taps = needed;
+                }
 
                 // Holds. scrFloor.holdLength is the game's own hold flag: -1 means "not a hold",
                 // 0 or more is a hold of that many extra beats (a Hold event with duration n puts n
                 // on this field, and n * 2 beats on the tile). The seconds come later, once the gap
                 // to the next tile is known - see the pass after ComputeBeats. Ordinary tiles keep
                 // the -1 the struct starts with.
-                note.HoldBeats = -1.0;
+                double holdBeats = -1.0;
                 if (_floorHoldLength != null)
                 {
                     double holdLength = ToDouble(_floorHoldLength.GetValue(f));
                     if (holdLength >= 0.0)
-                        note.HoldBeats = holdLength * 2.0;
+                    {
+                        holdBeats = holdLength * 2.0;
+                        // A hold's extra input comes from the hold itself, not from extra taps.
+                        taps = 1;
+                    }
                 }
 
-                _notes.Add(note);
+                // Direction from the entry angle: 0 = clockwise quarter turn in ADOFAI's
+                // encoding, which is what scrLevelMaker stores. Every tap of a tile shares it.
+                double entryAngle = _floorEntryAngle != null ? ToDouble(_floorEntryAngle.GetValue(f)) : 0.0;
+
+                for (int t = 0; t < taps; t++)
+                {
+                    var note = new Note();
+                    note.HitTime = entryTimes[i];
+                    note.SeqId = seqIds[i];
+                    note.Floor = f;
+                    note.MidSpin = IsMidSpin(f);
+                    note.GridAngle = double.NaN;
+                    note.Direction = entryAngle == 0.0 ? 1 : 0;
+                    note.HoldBeats = holdBeats;
+                    _notes.Add(note);
+                }
             }
 
             // ---- midspins: converted into normal tiles ---------------------------
